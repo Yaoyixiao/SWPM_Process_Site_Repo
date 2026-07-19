@@ -308,15 +308,72 @@
     const zoomIn = document.getElementById("zoomIn");
     const zoomOut = document.getElementById("zoomOut");
     const zoomFit = document.getElementById("zoomFit");
-    const zoomRatio = document.getElementById("zoomRatio");
     if (zoomIn) zoomIn.addEventListener("click", () => setZoom(_zoom * ZOOM_STEP));
     if (zoomOut) zoomOut.addEventListener("click", () => setZoom(_zoom / ZOOM_STEP));
     if (zoomFit) zoomFit.addEventListener("click", fitToPage);
-    if (zoomRatio) zoomRatio.addEventListener("change", e => setZoom(parseFloat(e.target.value)));
     card.addEventListener("wheel", onWheelZoom, { passive: false });
     initPan(card);
     card.classList.add("pannable");
     applyZoom();
+    initZoomPopover();
+  }
+
+  function initZoomPopover() {
+    const trigger = document.getElementById("zoomPct");
+    const popover = document.getElementById("zoomPopover");
+    const slider  = document.getElementById("zoomSlider");
+    const current = document.getElementById("zoomCurrent");
+    if (!trigger || !popover || !slider) return;
+
+    function syncToZoom() {
+      const idx = ZOOM_LEVELS.findIndex(z => Math.abs(z - _zoom) < 1e-3);
+      slider.value = String(idx >= 0 ? idx : 0);
+      if (current) current.textContent = Math.round(_zoom * 100) + "%";
+    }
+    syncToZoom();
+
+    function open() {
+      popover.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+      syncToZoom();
+      slider.focus();
+    }
+    function close() {
+      popover.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+    }
+    function toggle() { popover.hidden ? open() : close(); }
+
+    trigger.addEventListener("click", e => { e.stopPropagation(); toggle(); });
+    trigger.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); open(); }
+    });
+
+    let rafId = 0;
+    slider.addEventListener("input", () => {
+      const idx = parseInt(slider.value, 10);
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        setZoom(ZOOM_LEVELS[idx]);
+        syncToZoom();
+        rafId = 0;
+      });
+    });
+
+    popover.addEventListener("keydown", e => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        close();
+        trigger.focus();
+      }
+    });
+
+    document.addEventListener("click", e => {
+      if (popover.hidden) return;
+      if (e.target.closest(".zoom-trigger")) return;
+      close();
+    });
   }
 
   function applyZoom() {
@@ -324,11 +381,6 @@
     if (canvas) canvas.style.zoom = _zoom;
     const pctEl = document.getElementById("zoomPct");
     if (pctEl) pctEl.textContent = Math.round(_zoom * 100) + "%";
-    const sel = document.getElementById("zoomRatio");
-    if (sel) {
-      const hit = ZOOM_LEVELS.find(o => Math.abs(o - _zoom) < 0.001);
-      sel.value = hit != null ? String(hit) : "";
-    }
     const out = document.getElementById("zoomOut");
     const inb = document.getElementById("zoomIn");
     if (out) out.disabled = _zoom <= ZOOM_MIN + 1e-6;
@@ -428,15 +480,15 @@
         : `M ${s.left} ${s.cy} H ${t.rx}`;  // ← src-left → t-right, last seg ←, arrow ← into t.right
     }
 
-    // ③ Forward diagonal (dx>0, dy>0): exit right, go right, go down
-    if (dx > 0 && dy > 0) return `M ${s.rx} ${s.cy} H ${t.left} V ${t.top}`;
+    // ③ Forward diagonal (dx>0, dy>0): exit right, run to target's x-center, descend to top-midpoint
+    if (dx > 0 && dy > 0) return `M ${s.rx} ${s.cy} H ${t.cx} V ${t.top}`;
 
-    // ④ Backward diagonal (dx<0, dy>0): exit left, go left, go down
-    if (dx < 0 && dy > 0) return `M ${s.left} ${s.cy} H ${t.rx} V ${t.top}`;
+    // ④ Backward diagonal (dx<0, dy>0): exit left, run to target's x-center, descend to top-midpoint
+    if (dx < 0 && dy > 0) return `M ${s.left} ${s.cy} H ${t.cx} V ${t.top}`;
 
-    // ⑤ Diagonal target-above scenarios — exit from bottom (away from target), approach from below
-    if (dx > 0 && dy < 0) return `M ${s.rx} ${s.cy} H ${t.left} V ${t.by}`;
-    if (dx < 0 && dy < 0) return `M ${s.left} ${s.cy} H ${t.rx} V ${t.by}`;
+    // ⑤ Diagonal target-above — exit side, run to target's x-center, ascend to bottom-midpoint
+    if (dx > 0 && dy < 0) return `M ${s.rx} ${s.cy} H ${t.cx} V ${t.by}`;
+    if (dx < 0 && dy < 0) return `M ${s.left} ${s.cy} H ${t.cx} V ${t.by}`;
 
     // ⑥ Fallback (shouldn't occur)
     return `M ${s.cx} ${s.cy} L ${t.cx} ${t.cy}`;

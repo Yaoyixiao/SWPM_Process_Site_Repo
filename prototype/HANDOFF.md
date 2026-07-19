@@ -129,10 +129,28 @@ const DIAGRAMS = {
 | 同列向下 | ≈0 | >0 | `M s.cx s.by V t.top` (last seg ↓, arrow ↓) |
 | 同行向左 | <0 | ≈0 | `M s.left s.cy H t.rx` (last seg ←, arrow ←) |
 | 同行向右 | >0 | ≈0 | `M s.rx s.cy H t.left` (last seg →, arrow →) |
-| 对角线 | 任意非 0 | 任意非 0 | `M s.出口 s.cy H t.对侧 V t.top` (last seg ↓, arrow ↓) |
+| 对角向下 | ≠0 | >0 | `M s.出口 s.cy H t.cx V t.top` (last seg ↓, arrow ↓, lands on **top edge midpoint** `(t.cx, t.top)`) |
+| 对角向上 | ≠0 | <0 | `M s.出口 s.cy H t.cx V t.by`  (last seg ↑, arrow ↑, lands on **bottom edge midpoint** `(t.cx, t.by)`) |
 | 兜底 | — | — | `M s.cx s.cy L t.cx t.cy` |
 
 **违反后果**：要么越界，要么箭头方向错（见 §5.5）。
+
+#### §5.3.1 端点必须落在边沿中点，不是角落
+
+每条路径**末端落点**必须贴在目标节点某条边沿的**几何中点**，禁止落在 bbox 角落。规则汇总：
+
+| 入口边 | 中点坐标 | 何时触发 |
+|---|---|---|
+| target 上边沿 | `(t.cx, t.top)` | 对角向下（dx≠0, dy>0）：箭头进入节点**顶部正中** |
+| target 下边沿 | `(t.cx, t.by)` | 对角向上（dx≠0, dy<0）：箭头进入节点**底部正中** |
+| target 左边沿 | `(t.left, t.cy)` | 同行向右（dx>0, dy≈0） |
+| target 右边沿 | `(t.rx, t.cy)` | 同行向左（dx<0, dy≈0） |
+
+**为什么**：早期版本对角线 case 写成 `H t.left V t.top`（正向对角）或 `H t.rx V t.top`（反向对角），落点是 `(t.left, t.top)` / `(t.rx, t.top)` —— 矩形**左上/右上角**。30×30 ellipse 节点更糟：bbox 角落在圆外 5.7px 处（圆半径 15），视觉上箭头悬空。
+
+**判断口径**：写 `H ${...}` 或 `V ${...}` 时，先问"这段去到 target 的哪条边沿"；该边沿的中点 = (cx / cy, 该边沿坐标)。不是 (left/rx, top/by)。
+
+**椭圆特殊性**：对 ellipse（30×30，`border-radius:50%`），`t.cx + ±15` 才是圆周。`(t.cx, t.top)` 正好是圆顶 —— 同样适用；`(t.cx, t.by)` 是圆底。其它坐标（`(t.left, top)` 等 bbox 角）都在圆外。
 
 ### §5.4 **路径永不越界画布**
 
@@ -215,7 +233,7 @@ const DIAGRAMS = {
 |---|---|
 | 节点位置 | 在同一 cell 内 |
 | 连线方向 | 箭头朝目标盒子**内部**进 |
-| 连线起止点 | 不超出画布 |
+| 连线起止点 | 不超出画布；每条对角 case 末端落在目标边沿**中点**（§5.3.1），不是 bbox 角落 |
 | 节点颜色 | 蓝渐变 `#609eeb → #4690eb` |
 | 表头 | 浅蓝灰渐变 |
 | 字体 | Source Sans Pro（兜底 sans-serif） |
@@ -235,6 +253,7 @@ const DIAGRAMS = {
 | `<script type="module">` | 用普通 `<script>` |
 | 在 `_verify.js` 里加 null-from/to 的 guard | 不需要 —— 数据已无 orphan / inferred |
 | 把节点 wxh 改成 200×80 之类 | 保持 160×60 / 30×30 —— 数据 + 路由都假设这两个尺寸；要挪位置用 `dx`（§4.1），不改尺寸 |
+| 对角 case 写成 `H t.left V t.top` / `H t.rx V t.top` 落点在 bbox 角 | 必须 `H t.cx V t.top` / `H t.cx V t.by`，落点在边沿中点（§5.3.1） |
 
 ---
 
@@ -286,6 +305,17 @@ DRAWIO 第二轮把 Initiate Project 的 SWPM 列拓宽到 430px，同一 `(col,
 ### file:// 兼容性
 
 `<script type="module">` 在 `file://` 协议下加载不到（CORS）。用普通 `<script>` 是**唯一的**方案。除非改用 build step（vite 等），但那就违背了"零依赖双击可开"的需求。
+
+### ~~对角 case 落点为 bbox 角落~~ → 改为边沿中点
+
+第五轮（2026-07）用户截图 `Input/PIC/Snipaste_2026-07-19_13-07-53.png`：`swko_e1`（SW Technical Solution → SW Engineering Kick-Off Presentation）的箭头落在矩形**左上角**；`swko_e3`（SW Engineering Kick-Off Meeting → 末端 ellipse）的箭头落在 bbox **右上角** —— 对 30×30 圆节点而言即"圆外 5.7px 的虚空中"。
+
+原写法 `H t.left V t.top`（正向对角）/ `H t.rx V t.top`（反向对角）最后一笔落在角坐标。**修法**：把 H 段终点从 `t.left` / `t.rx` 改成 `t.cx`，落点变为上/下边沿中点 `(t.cx, t.top)` / `(t.cx, t.by)`。
+
+否决过的替代方案：
+- **每边 mid-side 入端口模型（top/bottom/left/right 4 端口 + 角度判定）** ❌ —— 已从 §10 上文否决，和这条同精神：纯几何坐标比端口抽象更直白。
+- **保持 bbox 角、靠加大箭头"撞"到节点边** ❌ —— 视觉骗术；任何 zoom 下都能看出箭头浮在角外。
+- **只修 dy>0 两条、修完 dy<0 再说** ❌ —— 已知 bug 留着 = 下次接手必然踩坑，§5 全部 case 必须内洽。
 
 ---
 

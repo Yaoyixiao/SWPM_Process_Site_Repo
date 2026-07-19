@@ -163,11 +163,110 @@
   }
   .tb-icons button:hover:not(:disabled) { color: var(--accent-hover); background: rgba(81,172,211,0.10); }
   .tb-icons button:disabled { color: var(--border-soft); cursor: not-allowed; }
-  .tb-icons .zoom { padding: 0 10px; font-size: 13px; min-width: 48px; text-align: center; }
-  .tb-icons .zoom-ratio {
-    height: 26px; margin: 0 4px; padding: 0 4px; font-size: 12px;
-    color: var(--text-muted); background: #fff;
-    border: 1px solid var(--border-soft); border-radius: 4px; cursor: pointer;
+  .tb-icons .zoom {
+    padding: 0 10px; font-size: 13px; min-width: 48px; text-align: center;
+    border: 0; background: transparent; color: inherit; font-family: inherit;
+  }
+
+  /* ============ Zoom popover (trigger + inline slider) ============ */
+  .zoom-trigger { position: relative; display: inline-flex; }
+
+  #zoomPct {
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background-color 120ms, color 120ms;
+  }
+  #zoomPct:hover,
+  #zoomPct[aria-expanded="true"] {
+    color: var(--accent-hover);
+    background: rgba(81,172,211,0.10);
+  }
+  #zoomPct:focus-visible {
+    outline: 2px solid var(--brand-end);
+    outline-offset: 1px;
+  }
+
+  .zoom-popover {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: 180px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 10px 8px;
+    box-shadow: 0 2px 8px rgba(20,40,80,0.10);
+    z-index: 40;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 100ms ease;
+  }
+  .zoom-popover[hidden] { display: none; }
+  .zoom-popover:not([hidden]) { opacity: 1; pointer-events: auto; }
+
+  .zoom-popover-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 2px;
+  }
+  .zoom-current {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+
+  .zoom-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 12px;
+    background: transparent;
+    margin: 0;
+    display: block;
+    cursor: pointer;
+  }
+  .zoom-slider:focus { outline: none; }
+  .zoom-slider::-webkit-slider-runnable-track {
+    height: 2px;
+    background: var(--border);
+    border-radius: 1px;
+  }
+  .zoom-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--brand-glow);
+    border: 2px solid var(--brand-end);
+    margin-top: -4px;
+    box-shadow: 0 1px 2px rgba(20,40,80,0.10);
+    cursor: grab;
+  }
+  .zoom-slider:active::-webkit-slider-thumb { cursor: grabbing; }
+  .zoom-slider::-moz-range-track {
+    height: 2px;
+    background: var(--border);
+    border-radius: 1px;
+  }
+  .zoom-slider::-moz-range-thumb {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--brand-glow);
+    border: 2px solid var(--brand-end);
+    box-shadow: 0 1px 2px rgba(20,40,80,0.10);
+    cursor: grab;
+  }
+  .zoom-slider:focus-visible {
+    outline: 2px solid var(--brand-end);
+    outline-offset: 4px;
+    border-radius: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .zoom-popover { transition: none; }
   }
 
   /* ============ Matrix card / canvas ============ */
@@ -519,20 +618,22 @@
         <button id="zoomOut" title="Zoom out" aria-label="Zoom out">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
         </button>
-        <span class="zoom" id="zoomPct">100%</span>
+        <span class="zoom-trigger">
+          <button type="button" class="zoom" id="zoomPct"
+            aria-haspopup="dialog" aria-expanded="false" aria-controls="zoomPopover"
+            title="Click to choose zoom level">100%</button>
+          <div class="zoom-popover" id="zoomPopover" role="dialog" aria-label="Zoom level" hidden>
+            <div class="zoom-popover-row">
+              <span class="zoom-current" id="zoomCurrent">100%</span>
+            </div>
+            <input type="range" class="zoom-slider" id="zoomSlider"
+              min="0" max="7" step="1" value="3"
+              aria-label="Zoom level" tabindex="0" />
+          </div>
+        </span>
         <button id="zoomIn" title="Zoom in" aria-label="Zoom in">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
         </button>
-        <select id="zoomRatio" class="zoom-ratio" title="Zoom level" aria-label="Zoom level">
-          <option value="0.25">25%</option>
-          <option value="0.5">50%</option>
-          <option value="0.75">75%</option>
-          <option value="1" selected>100%</option>
-          <option value="1.25">125%</option>
-          <option value="1.5">150%</option>
-          <option value="2">200%</option>
-          <option value="4">400%</option>
-        </select>
         <button title="Collapse" aria-label="Collapse">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg>
         </button>
