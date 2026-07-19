@@ -23,11 +23,15 @@
   let _stack = [];          // breadcrumb of diagram keys (root → current)
   let _selectedNodeId = null;   // id of node whose drawer is currently open (or null)
   let _els = null;              // cached DOM refs, populated in initDrawer()
+  let _zoom = 1;                // current zoom level (1 = 100%)
+  const ZOOM_MIN = 0.25, ZOOM_MAX = 4, ZOOM_STEP = 1.2;
+  const ZOOM_LEVELS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 4];
 
   // ─── Boot ─────────────────────────────────────────────────────────────
   Renderer.mount = function () {
     buildLeftRail();
     initDrawer();
+    initZoom();
     // Try to derive root (the diagram with no parent). Fallback: first key.
     const root = pickRoot() || Object.keys(DIAGRAMS)[0];
     Renderer.render(root);
@@ -73,6 +77,8 @@
     // breadcrumb / drill). Reset selection before rebuilding the canvas so the
     // next click is guaranteed to open, not no-op.
     closeDrawer();
+    // Reset zoom to 100% on every diagram switch.
+    _zoom = 1; applyZoom();
 
     // Update breadcrumb stack: replace trailing same key, else push.
     if (_stack[_stack.length - 1] !== diagramKey) {
@@ -292,6 +298,96 @@
     // Scroll canvas back to top-left for the new diagram
     const card = canvas.closest(".matrix-card");
     if (card) { card.scrollLeft = 0; card.scrollTop = 0; }
+  }
+
+  // ─── Zoom / Fit-to-page / Pan ──────────────────────────────────────────
+  function initZoom() {
+    const card = document.querySelector(".matrix-card");
+    const canvas = document.getElementById("canvas");
+    if (!card || !canvas) return;
+    const zoomIn = document.getElementById("zoomIn");
+    const zoomOut = document.getElementById("zoomOut");
+    const zoomFit = document.getElementById("zoomFit");
+    const zoomRatio = document.getElementById("zoomRatio");
+    if (zoomIn) zoomIn.addEventListener("click", () => setZoom(_zoom * ZOOM_STEP));
+    if (zoomOut) zoomOut.addEventListener("click", () => setZoom(_zoom / ZOOM_STEP));
+    if (zoomFit) zoomFit.addEventListener("click", fitToPage);
+    if (zoomRatio) zoomRatio.addEventListener("change", e => setZoom(parseFloat(e.target.value)));
+    card.addEventListener("wheel", onWheelZoom, { passive: false });
+    initPan(card);
+    card.classList.add("pannable");
+    applyZoom();
+  }
+
+  function applyZoom() {
+    const canvas = document.getElementById("canvas");
+    if (canvas) canvas.style.zoom = _zoom;
+    const pctEl = document.getElementById("zoomPct");
+    if (pctEl) pctEl.textContent = Math.round(_zoom * 100) + "%";
+    const sel = document.getElementById("zoomRatio");
+    if (sel) {
+      const hit = ZOOM_LEVELS.find(o => Math.abs(o - _zoom) < 0.001);
+      sel.value = hit != null ? String(hit) : "";
+    }
+    const out = document.getElementById("zoomOut");
+    const inb = document.getElementById("zoomIn");
+    if (out) out.disabled = _zoom <= ZOOM_MIN + 1e-6;
+    if (inb) inb.disabled = _zoom >= ZOOM_MAX - 1e-6;
+  }
+
+  function setZoom(z) {
+    _zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+    applyZoom();
+  }
+
+  function fitToPage() {
+    const card = document.querySelector(".matrix-card");
+    const canvas = document.getElementById("canvas");
+    if (!card || !canvas) return;
+    const PAD = 24;
+    // Read intrinsic (un-zoomed) canvas size from inline width/height set by buildCanvas
+    const contentW = parseFloat(canvas.style.width)  || canvas.offsetWidth  / _zoom;
+    const contentH = parseFloat(canvas.style.height) || canvas.offsetHeight / _zoom;
+    const scale = Math.min(
+      (card.clientWidth  - PAD) / contentW,
+      (card.clientHeight - PAD) / contentH
+    );
+    setZoom(scale);
+    card.scrollLeft = 0; card.scrollTop = 0;
+  }
+
+  let _wheelPending = false;
+  function onWheelZoom(e) {
+    if (!e.ctrlKey) return;   // let normal scroll pass through
+    e.preventDefault();       // block browser-level page zoom
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    if (_wheelPending) return;
+    _wheelPending = true;
+    requestAnimationFrame(() => { _wheelPending = false; setZoom(_zoom * factor); });
+  }
+
+  function initPan(card) {
+    let panning = false, sx = 0, sy = 0, sl = 0, st = 0;
+    card.addEventListener("pointerdown", e => {
+      if (e.button !== 0 || e.target.closest(".activity")) return; // preserve node click → drawer
+      panning = true; sx = e.clientX; sy = e.clientY;
+      sl = card.scrollLeft; st = card.scrollTop;
+      card.setPointerCapture(e.pointerId);
+      card.classList.add("panning");
+    });
+    card.addEventListener("pointermove", e => {
+      if (!panning) return;
+      card.scrollLeft = sl - (e.clientX - sx);
+      card.scrollTop  = st - (e.clientY - sy);
+    });
+    const end = e => {
+      if (!panning) return;
+      panning = false;
+      card.classList.remove("panning");
+      try { card.releasePointerCapture(e.pointerId); } catch (_) {}
+    };
+    card.addEventListener("pointerup", end);
+    card.addEventListener("pointercancel", end);
   }
 
   // ─── Geometry helpers ─────────────────────────────────────────────────
