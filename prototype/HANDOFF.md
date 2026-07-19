@@ -253,6 +253,8 @@ const DIAGRAMS = {
 | `<script type="module">` | 用普通 `<script>` |
 | 在 `_verify.js` 里加 null-from/to 的 guard | 不需要 —— 数据已无 orphan / inferred |
 | 把节点 wxh 改成 200×80 之类 | 保持 160×60 / 30×30 —— 数据 + 路由都假设这两个尺寸；要挪位置用 `dx`（§4.1），不改尺寸 |
+| ❌ 在 hover 上自动 collapse 左栏 | ✅ 显式点击 `.left-rail-toggle`，状态写到 `localStorage["railCollapsed"]`；首次打开保持展开。 |
+| ❌ 给左栏 collapse 加 per-diagram remember / per-user preference | 保持 dumb：一条 localStorage 布尔，没有 UI 重置入口。 |
 | 对角 case 写成 `H t.left V t.top` / `H t.rx V t.top` 落点在 bbox 角 | 必须 `H t.cx V t.top` / `H t.cx V t.by`，落点在边沿中点（§5.3.1） |
 
 ---
@@ -317,11 +319,24 @@ DRAWIO 第二轮把 Initiate Project 的 SWPM 列拓宽到 430px，同一 `(col,
 - **保持 bbox 角、靠加大箭头"撞"到节点边** ❌ —— 视觉骗术；任何 zoom 下都能看出箭头浮在角外。
 - **只修 dy>0 两条、修完 dy<0 再说** ❌ —— 已知 bug 留着 = 下次接手必然踩坑，§5 全部 case 必须内洽。
 
+### ~~侧栏默认一直 220px 不可收~~ → collapse toggle + localStorage
+
+第六轮（2026-07）用户要求左栏（`.left-rail`）可收起。**选 (C)** CSS grid 列宽收窄（220px → 48px）+ 200ms `width` transition；底部 anchored 切换按钮放进 rail 内部（生命周期与 DOM 同步）；状态写入 `localStorage["railCollapsed"]`，首次访问保持展开。
+
+否决过的方案：
+- **(a) 把 toggle 按钮 hard-code 到 `index.html`** ❌ —— toggle 的存在与 rail 强绑定，但 DOM 散在两处；后续其他会话加新 rail 会忘了同步。
+- **(b) `display: none` 整列收起** ❌ —— grid 列折叠后画布右移抖动；与 §5.4「路径永不越界画布」内的"侧向空间感知"冲突。
+- **(d) hover-to-expand 自动展开** ❌ —— 与「显式交互 + 状态持久化」整体心智模型相悖；用户停手就闪烁，体验抖。
+
+`localStorage["railCollapsed"]` 是项目里**唯一一处**持久化用户偏好的地方；其他任何"记住上次选中"都属于 §10.1 rejected 范畴。
+
 ---
 
 ## §11. Node-detail drawer（追加说明）
 
 右滑抽屉，展示选中节点的 DRAWIO 属性。**纯叠加**：不影响 §5 的边/路由。
+
+> `.app` 同时承载画布 chromium、drawer (`margin-right`) 与左栏 collapse (`grid-template-columns`)。这是项目里**唯一允许**为 UI chrome 改 `.app` 样式的地方；数据驱动层（§4/§5）一律不得触碰 `.app` / `.left-rail` / `.drawer` 的几何。
 
 ### 数据形态
 
@@ -378,3 +393,52 @@ DRAWIO 第二轮把 Initiate Project 的 SWPM 列拓宽到 430px，同一 `(col,
 - ❌ 不要在抽屉 header 上加大字体 hero（"Inspect a node" 之类）—— 标题就是节点 label。
 - ❌ 不要把 drill 按钮挪回节点 click —— 抽屉第一、drill 在抽屉头（Q5）。
 - ❌ 不要让 `closeDrawer()` 被 `Renderer.render` 之外的其他代码直接手动调用 —— 统一走 `Renderer.render` 这一条岔口（避免双 toggle）。
+
+---
+
+## §12. 全局搜索栏（追加说明）
+
+顶部搜索栏（`index.html` `.search-wrap`）是**跨全部图**的内存搜索。**纯叠加**：不改 `diagrams.js`、不碰 §5 的边/路由、不改节点尺寸。逻辑全在 `renderer.js` 的搜索模块里，`Renderer.mount()` 通过 `initSearch()` 启动。
+
+### 索引范围与去重
+
+`buildSearchIndex()` 在 mount 时遍历 `DIAGRAMS` 建一次扁平索引并缓存（`_searchIndex`），三类可搜内容：
+
+| 类型 | 来源 | 落点行为 |
+|---|---|---|
+| **page** | 图 `title` | 点击只 `Renderer.render(图)`，不高亮、不开 drawer（无落点节点） |
+| **activity** | 节点 `label` | 跳图 + `.activity.selected` 高亮 + `openDrawer` |
+| **attr** | 节点 `attrs` 的值（label 未命中时才归此组） | 同 activity，且次行列出命中的字段名 |
+
+**去重**：按 `(diagramKey, nodeId)` 折叠为一条，一个节点即使多字段命中也只出一行（次行列全字段）；**跨图同名节点保留为不同条**（它们是不同落点）。
+
+### 匹配 / 排序 / 交互（已收敛，勿再讨论）
+
+- 子串匹配（`toLowerCase().includes`），**≥2 字符**（`SEARCH_MIN`）才出结果。
+- 排序 `scoreOf(fieldWeight, matchPos)`：字段权重 label(2) > 图标题(3，page 组独立) > attr(1)，前缀命中 +10；同分按 `label.localeCompare`。
+- 分组顺序固定 **Pages → Activities → Attributes**（`GROUP_ORDER`）；每组上限 **8 条**（`SEARCH_GROUP_CAP`），超出显示 `+N more`（不翻页）。
+- 键盘：↑↓ 移动 `aria-activedescendant`、Enter 选中、Esc 关闭（不清空输入）。关闭下拉：点击 `.search-wrap` 外 / Esc / 选中。
+- 空结果显示 `.search-empty`（"No matches for …"）。
+
+### ⚠️ 事件顺序陷阱（务必保留）
+
+`initDrawer()` 里有 document 级 outside-click 监听（`renderer.js`，见 §11），会在"点击非 `.drawer`/`.activity`"时 `closeDrawer()`。搜索结果条在两者之外，若用 `click` 选中，同一次点击冒泡到 document 会**立刻把刚开的抽屉关掉**。
+
+**解法（勿改回 `click`）**：结果条用 `mousedown` + `e.preventDefault()` + `e.stopPropagation()` 触发 `selectResult`；且 `selectResult` 里把 `openDrawer` 放进 `requestAnimationFrame`——先让 `Renderer.render` 重建画布（新的 `.activity` 元素才存在），再定位高亮 + 开抽屉。
+
+### 视觉（沿用现有 token，无新色板）
+
+下拉浮层 `.search-results` 复用 `--surface`/`--border`/`--border-soft`；关键词 `<mark>` 用 `--brand-glow` 底 + `--brand-end` 字；键盘/hover 选中态用 `--header-grad-top` 底 + 左侧 `--brand-end` 竖条；组小标题借 drawer 的字段索引惯例（uppercase + 字距 + `--field-index-color` 计数）。**未新增任何 token / 色板**。
+
+### 导出与验证
+
+- `Renderer._search = { buildIndex, run }` 暴露给 Node smoke-test（DOM guard 同 §11，`require()` 不触碰 DOM）。
+- **新文件** `prototype/_verify_search.js`（开发期校验，非运行时依赖，与 `_verify_drawer.js` 同类）：断言 "kick"→Activities 命中、"EPM"→Attributes 命中且字段为 Responsible、"management"→Pages 命中、<2 字符返回空、跨图同名 "Engineering Kick-Off" 出 3 条且各唯一。
+
+### 反模式
+
+- ❌ 不要把结果条选中改回 `click` —— 会被 outside-click 立刻关掉抽屉（见上「事件顺序陷阱」）。
+- ❌ 不要按 `label` 跨图去重 —— 跨图同名是不同落点，必须保留为不同条。
+- ❌ 不要给下拉新增色板 —— 只吃现有 token。
+- ❌ 不要做模糊匹配 / 翻页 / 搜索历史持久化 —— `localStorage["railCollapsed"]` 仍是**唯一**持久化项（§10）。
+- ❌ 不要在 attr 组重复 label 已命中的节点 —— label 命中归 activity，attr 组只收 label 未命中者。

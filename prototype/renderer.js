@@ -30,8 +30,10 @@
   // ─── Boot ─────────────────────────────────────────────────────────────
   Renderer.mount = function () {
     buildLeftRail();
+    initLeftRailToggle();
     initDrawer();
     initZoom();
+    initSearch();
     // Try to derive root (the diagram with no parent). Fallback: first key.
     const root = pickRoot() || Object.keys(DIAGRAMS)[0];
     Renderer.render(root);
@@ -153,11 +155,30 @@
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "left-rail-item";
-      btn.dataset.key = findKeyByTitle(d.title);
+      const key = findKeyByTitle(d.title);
+      btn.dataset.key = key || "";
+      btn.title = d.title;
+      btn.setAttribute("aria-label", d.title);
       btn.innerHTML = `<span class="dot"></span><span class="label">${escapeHtml(d.title)}</span>`;
       btn.addEventListener("click", () => navigateFresh(btn.dataset.key));
       rail.appendChild(btn);
     });
+
+    // Bottom-anchored toggle — switches rail between 220px (expanded) and 48px
+    // (collapsed). Lifecycle lives in the rail so it can't drift from .left-rail.
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.id = "leftRailToggle";
+    toggle.className = "left-rail-toggle";
+    toggle.setAttribute("aria-controls", "leftRail");
+    toggle.setAttribute("aria-expanded", "true");
+    toggle.setAttribute("aria-label", "Collapse sidebar");
+    toggle.innerHTML =
+        '<svg class="ico" width="14" height="14" viewBox="0 0 24 24"'
+      + ' fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M15 18l-6-6 6-6"/></svg>';
+    rail.appendChild(toggle);
   }
   function navigateFresh(key) {
     _stack = [key];
@@ -171,6 +192,31 @@
     document.querySelectorAll(".left-rail-item").forEach(el => {
       el.classList.toggle("active", el.dataset.key === key);
     });
+  }
+
+  // Sidebar collapse: read stored preference once at boot, write on change.
+  // Re-focuses the toggle after click so AT users hear the state update.
+  function initLeftRailToggle() {
+    const toggle = document.getElementById("leftRailToggle");
+    const app = document.querySelector(".app");
+    if (!toggle || !app) return;
+
+    if (localStorage.getItem("railCollapsed") === "true") {
+      setCollapsed(true, /*persist*/ false);
+    }
+
+    toggle.addEventListener("click", () => {
+      const next = !app.classList.contains("rail-collapsed");
+      setCollapsed(next, /*persist*/ true);
+      toggle.focus();
+    });
+
+    function setCollapsed(collapsed, persist) {
+      app.classList.toggle("rail-collapsed", collapsed);
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+      toggle.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+      if (persist) localStorage.setItem("railCollapsed", String(collapsed));
+    }
   }
 
   // ─── Canvas build ─────────────────────────────────────────────────────
@@ -659,6 +705,277 @@
       `<span class="seg total"><span class="label">total</span><span class="num">${total}</span></span>` +
       `<span class="seg real"><span class="label">real</span><span class="num">${real}</span></span>`;
   }
+
+  // ─── Global search ────────────────────────────────────────────────────
+  // Flat in-memory index over all diagrams: node labels, node attr values,
+  // and diagram titles. Built once at mount. Dropdown groups results by type
+  // (Pages / Activities / Attributes); selecting one jumps to the diagram and,
+  // for node results, highlights the node + opens the drawer.
+  const SEARCH_MIN = 2;      // min chars before searching
+  const SEARCH_GROUP_CAP = 8; // max rows shown per group
+  let _searchIndex = null;   // built lazily by buildSearchIndex()
+  let _searchEls = null;
+  let _searchActive = -1;    // index into _searchFlat for keyboard nav
+  let _searchFlat = [];      // flattened visible options (for ↑↓/Enter)
+
+  const GROUP_ORDER = [
+    { type: "page",     label: "Pages" },
+    { type: "activity", label: "Activities" },
+    { type: "attr",     label: "Attributes" }
+  ];
+
+  function buildSearchIndex() {
+    if (_searchIndex) return _searchIndex;
+    const items = [];
+    Object.keys(DIAGRAMS).forEach(key => {
+      const d = DIAGRAMS[key];
+      // Page entry: diagram title.
+      items.push({
+        type: "page", diagramKey: key, diagramTitle: d.title,
+        nodeId: null, label: d.title, fields: [],
+        // haystack term for matching + the field name matched (title)
+        _match: { title: (d.title || "").toLowerCase() }
+      });
+      // Node entries: dedupe activity/attr hits per (diagramKey, nodeId).
+      (d.nodes || []).forEach(n => {
+        if (!n.label && !n.attrs) return;          // skip empty ellipse ends
+        const labelLc = (n.label || "").toLowerCase();
+        const attrMatch = {};
+        if (n.attrs) {
+          Object.keys(n.attrs).forEach(k => {
+            attrMatch[k] = String(n.attrs[k] || "").toLowerCase();
+          });
+        }
+        items.push({
+          type: "node",                            // resolved to activity/attr per query
+          diagramKey: key, diagramTitle: d.title,
+          nodeId: n.id, label: n.label || "(unnamed)",
+          _match: { label: labelLc, attrs: attrMatch }
+        });
+      });
+    });
+    _searchIndex = items;
+    return items;
+  }
+
+  // Returns { page:[], activity:[], attr:[] } — each an array of result rows
+  // { item, group, fields:[names], score } already sorted + capped-aware
+  // (overflow counted separately). Empty object when q too short.
+  function runSearch(rawQ) {
+    const q = (rawQ || "").trim().toLowerCase();
+    const out = { page: [], activity: [], attr: [], overflow: { page: 0, activity: 0, attr: 0 } };
+    if (q.length < SEARCH_MIN) return out;
+    const idx = buildSearchIndex();
+
+    idx.forEach(it => {
+      if (it.type === "page") {
+        const hay = it._match.title;
+        const pos = hay.indexOf(q);
+        if (pos >= 0) {
+          out.page.push({ item: it, group: "page", fields: [], score: scoreOf(3, pos) });
+        }
+        return;
+      }
+      // node → decide activity vs attr group
+      const labelPos = it._match.label.indexOf(q);
+      const attrFields = [];
+      Object.keys(it._match.attrs).forEach(k => {
+        if (it._match.attrs[k].indexOf(q) >= 0) attrFields.push(k);
+      });
+      if (labelPos >= 0) {
+        out.activity.push({
+          item: it, group: "activity",
+          fields: ["label"], score: scoreOf(2, labelPos)
+        });
+      } else if (attrFields.length) {
+        // attr-only hit (label didn't match)
+        const best = Math.min(...attrFields.map(k => it._match.attrs[k].indexOf(q)));
+        out.attr.push({
+          item: it, group: "attr",
+          fields: attrFields, score: scoreOf(1, best)
+        });
+      }
+    });
+
+    // Sort each group: score desc, then label alphabetical.
+    ["page", "activity", "attr"].forEach(g => {
+      out[g].sort((a, b) =>
+        b.score - a.score ||
+        a.item.label.localeCompare(b.item.label));
+      if (out[g].length > SEARCH_GROUP_CAP) {
+        out.overflow[g] = out[g].length - SEARCH_GROUP_CAP;
+        out[g] = out[g].slice(0, SEARCH_GROUP_CAP);
+      }
+    });
+    return out;
+  }
+
+  // Higher = more relevant. Field weight dominates; prefix match adds a bump.
+  function scoreOf(fieldWeight, matchPos) {
+    return fieldWeight * 100 + (matchPos === 0 ? 10 : 0);
+  }
+
+  function initSearch() {
+    const input = document.getElementById("globalSearch");
+    const panel = document.getElementById("searchResults");
+    if (!input || !panel) return;
+    _searchEls = { input, panel };
+
+    input.addEventListener("input", () => renderSearch(input.value));
+    input.addEventListener("focus", () => {
+      if (input.value.trim().length >= SEARCH_MIN) renderSearch(input.value);
+    });
+    input.addEventListener("keydown", onSearchKeydown);
+
+    // Click outside closes the panel.
+    document.addEventListener("click", (e) => {
+      if (panel.hidden) return;
+      if (e.target.closest(".search-wrap")) return;
+      closeSearch();
+    });
+  }
+
+  function renderSearch(rawQ) {
+    const { input, panel } = _searchEls;
+    const q = (rawQ || "").trim();
+    if (q.length < SEARCH_MIN) { closeSearch(); return; }
+
+    const res = runSearch(q);
+    _searchFlat = [];
+    _searchActive = -1;
+
+    const total = res.page.length + res.activity.length + res.attr.length;
+    let html = "";
+    if (!total) {
+      html = `<div class="search-empty">No matches for “${escapeHtml(q)}”</div>`;
+    } else {
+      GROUP_ORDER.forEach(g => {
+        const rows = res[g.type];
+        if (!rows.length) return;
+        html += `<div class="search-group" role="group" aria-label="${g.label}">`;
+        html += `<div class="search-group-head">${g.label}` +
+          `<span class="grp-count">· ${rows.length + res.overflow[g.type]}</span></div>`;
+        rows.forEach(r => {
+          const flatIdx = _searchFlat.length;
+          _searchFlat.push(r);
+          html += optionHtml(r, q, flatIdx);
+        });
+        if (res.overflow[g.type]) {
+          html += `<div class="search-more">+${res.overflow[g.type]} more</div>`;
+        }
+        html += `</div>`;
+      });
+    }
+    panel.innerHTML = html;
+    panel.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+
+    // Bind pointer selection. Use mousedown + preventDefault so the input keeps
+    // focus and the document-level outside-click (drawer close, initDrawer) does
+    // not fire before selectResult runs its own render/openDrawer sequence.
+    panel.querySelectorAll(".search-option").forEach(el => {
+      el.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        selectResult(_searchFlat[Number(el.dataset.flat)]);
+      });
+      el.addEventListener("mouseenter", () => setActiveOption(Number(el.dataset.flat)));
+    });
+  }
+
+  function optionHtml(r, q, flatIdx) {
+    const it = r.item;
+    const main = highlightMatch(it.label, q);
+    let sub;
+    if (r.group === "page") {
+      sub = `Jump to page`;
+    } else if (r.group === "activity") {
+      sub = `${escapeHtml(it.diagramTitle)} · <span class="opt-field">Activity</span>`;
+    } else {
+      const fieldNames = r.fields.map(f => f.replace(/_/g, " ")).join(", ");
+      sub = `${escapeHtml(it.diagramTitle)} · <span class="opt-field">${escapeHtml(fieldNames)}</span>`;
+    }
+    return `<div class="search-option" role="option" id="searchOpt-${flatIdx}" ` +
+      `data-flat="${flatIdx}" aria-selected="false">` +
+      `<div class="opt-main">${main}</div>` +
+      `<div class="opt-sub">${sub}</div></div>`;
+  }
+
+  // Case-insensitive substring highlight. Escapes the label first, then wraps
+  // the (case-insensitive) match in <mark>.
+  function highlightMatch(label, q) {
+    const safe = escapeHtml(label);
+    const lc = label.toLowerCase();
+    const pos = lc.indexOf(q.toLowerCase());
+    if (pos < 0) return safe;
+    // Re-locate in the escaped string by re-escaping the three slices.
+    const before = escapeHtml(label.slice(0, pos));
+    const hit = escapeHtml(label.slice(pos, pos + q.length));
+    const after = escapeHtml(label.slice(pos + q.length));
+    return `${before}<mark>${hit}</mark>${after}`;
+  }
+
+  function onSearchKeydown(e) {
+    const { panel } = _searchEls;
+    if (e.key === "Escape") {
+      if (!panel.hidden) { e.stopPropagation(); closeSearch(); }
+      return;
+    }
+    if (panel.hidden || !_searchFlat.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveOption((_searchActive + 1) % _searchFlat.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveOption((_searchActive - 1 + _searchFlat.length) % _searchFlat.length);
+    } else if (e.key === "Enter") {
+      if (_searchActive >= 0) {
+        e.preventDefault();
+        selectResult(_searchFlat[_searchActive]);
+      }
+    }
+  }
+
+  function setActiveOption(i) {
+    const { input, panel } = _searchEls;
+    _searchActive = i;
+    const opts = panel.querySelectorAll(".search-option");
+    opts.forEach(el => el.setAttribute("aria-selected",
+      Number(el.dataset.flat) === i ? "true" : "false"));
+    const active = panel.querySelector(`#searchOpt-${i}`);
+    if (active) {
+      active.scrollIntoView({ block: "nearest" });
+      input.setAttribute("aria-activedescendant", `searchOpt-${i}`);
+    }
+  }
+
+  function selectResult(r) {
+    if (!r) return;
+    closeSearch();
+    const it = r.item;
+    Renderer.render(it.diagramKey);          // rebuild canvas + closeDrawer()
+    if (r.group === "page" || !it.nodeId) return;  // pages: jump only
+    const d = DIAGRAMS[it.diagramKey];
+    const node = d && d.nodes.find(n => n.id === it.nodeId);
+    if (!node) return;
+    // Defer so the fresh canvas (activity elements) exists before we open the
+    // drawer / move the .selected ring, and after any outside-click settles.
+    requestAnimationFrame(() => openDrawer(node, d, it.diagramKey));
+  }
+
+  function closeSearch() {
+    if (!_searchEls) return;
+    const { input, panel } = _searchEls;
+    panel.hidden = true;
+    panel.innerHTML = "";
+    _searchFlat = [];
+    _searchActive = -1;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+  }
+
+  // Expose search internals for the Node smoke-test (no DOM needed).
+  Renderer._search = { buildIndex: buildSearchIndex, run: runSearch };
 
   // Boot when DOM is ready. Guard so Node `require()` (used by _verify_drawer.js)
   // doesn't try to touch `document`.
